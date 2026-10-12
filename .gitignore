@@ -1,0 +1,40 @@
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local datasets and assignment PDFs
+/data/
+/*.pdf
+
+# Models and training checkpoints
+/models/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Experiment outputs and logs
+/outputs/
+/results/
+/runs/
+/wandb/
+*.log
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# macOS files
+.DS_Store
+
+*.md
+!README.md
