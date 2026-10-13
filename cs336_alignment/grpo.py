@@ -54,6 +54,8 @@ def compute_group_normalized_rewards(
     advantage_eps: float = 1e-6,
     advantage_normalizer: Literal["std", "none", "mean"] = "std"
 ):
+    #计算每道题生成回答的优势a 
+
     if baseline != "mean" or advantage_normalizer != "std":
         raise NotImplementedError("Only standard GRPO is suportted.")
 
