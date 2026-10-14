@@ -1,7 +1,7 @@
 from typing import Callable,Literal
 import torch
 from transformers import PreTrainedTokenizerBase
-from cs336_alignment.tokenization import tokenize_prompt_and_output
+from cs336_alignment.tokenization import tokenize_prompt_and_output,get_response_log_probs
 
 
 def compute_rollout_rewards(
@@ -91,6 +91,7 @@ def compute_policy_gradient_loss_on_policy(
     """
     raw_rewards_or_advantages: 计算出来的优势A
     policy_log_probs: 每个token的对数概率
+    该函数用于计算每个 token 的策略梯度损失
     """
 
     if importance_reweighting_method != "none":
@@ -109,6 +110,9 @@ def aggregate_loss_across_microbatch_sequence(
     loss_normalization: Literal["sequence", "constant"] = "sequence",
     normalization_constant: int | None = None,
 ) -> torch.Tensor:
+    """
+    计算整个批次的平均损失
+    """
 
     if loss_normalization != "sequence":
         raise NotImplementedError(f"only suport sequence mean!")
@@ -232,6 +236,13 @@ def grpo_train_step(
     mask_batches = response_mask.tensor_split(K, dim=0)
     advantage_batches = advantages.tensor_split(K, dim=0)
 
+    model.train()
+    batch_loss = torch.zeros((), device=device, dtype=torch.float32)
+    entropy_sum = torch.zeros((), device=device, dtype=torch.float32)
+    response_token_count = torch.zeros((), device=device, dtype=torch.long)
+
+    optimizer.zero_grad(set_to_none=True)
+    # 对每个microbathch进行计算
     for cur_input_ids, cur_labels, cur_response_mask, cur_advantages in zip(
         input_batches, label_batches, mask_batches, advantage_batches
         ):
@@ -243,5 +254,70 @@ def grpo_train_step(
         == cur_labels.shape[0]
         == cur_response_mask.shape[0]
         == cur_advantages.shape[0]
-)
+    )
+        
+        # 模型前向计算token对数概率和熵
+        model_output = get_response_log_probs(
+            model = model,
+            input_ids=cur_input_ids,
+            labels=cur_labels,
+            return_token_entropy=True
+        )
+        log_probs = model_output["log_probs"]
+        token_entropy = model_output["token_entropy"]
+
+        # 计算每个 token 的策略梯度损失
+        per_token_loss, loss_metadata = compute_policy_gradient_loss_on_policy(
+            raw_rewards_or_advantages=cur_advantages,
+            policy_log_probs=log_probs,
+            importance_reweighting_method=importance_reweighting_method
+        )
+
+        # 排除无效位置，计算微批次平均损失
+        microbatch_loss = aggregate_loss_across_microbatch_sequence(
+            per_token_policy_gradient_loss=per_token_loss,
+            mask=cur_response_mask,
+            loss_normalization=loss_normalization
+        )
+
+        # 调整为该microbatch对整个batch的贡献
+        scaled_loss = microbatch_loss * weight
+        scaled_loss.backward()
+
+        # ===累计计算用于日志的数据===
+
+        batch_loss += scaled_loss.detach()
+        # 熵总和
+        masked_entropy = (token_entropy.detach() * cur_response_mask).to(torch.float32)
+        entropy_sum += masked_entropy.sum()
+
+        # token数
+        response_token_count += cur_response_mask.sum().to(torch.long)
+
+    # 梯度裁剪
+    clip_threshold = (
+        float('inf') if max_grad_norm is None else max_grad_norm
+    )
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        parameters=model.parameters(),
+        max_norm=clip_threshold,
+        norm_type=2.0,
+    )
+
+    # 更新梯度
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    # 整理整个批次的指标
+    mean_token_entropy = entropy_sum / response_token_count
+    metadata = {
+        "loss": batch_loss.item(),
+        "grad_norm": grad_norm,
+        "token_entropy": mean_token_entropy.item()
+    }
+    metadata.update(reward_metadata)
+    metadata.update(advantage_metadata)
+
+    return batch_loss, metadata
+
 
